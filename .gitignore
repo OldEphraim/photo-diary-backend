@@ -1,0 +1,27 @@
+# Environment variables
+.env
+
+# Compiled Python files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# Pyenv version file
+.python-version
+
+# Local data store
+entries.json
+
+# OS-specific files
+.DS_Store
+
+# Editor-specific files
+.vscode/
+.idea/
+*.swp
