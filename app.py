@@ -98,6 +98,10 @@ def upload():
     caption = request.form.get("caption", "")
     file = request.files.get("file")
     audio = request.files.get("audio")  # Optional
+    requires_stitching = request.form.get("requiresStitching", "false") == "true"
+    audio_duration = request.form.get("audioDuration", None)
+    
+    print(f"📝 Upload details: has_audio={audio is not None}, requires_stitching={requires_stitching}")
 
     if not file:
         return jsonify({"error": "No file uploaded"}), 400
@@ -106,8 +110,9 @@ def upload():
     file_key = f"user_uploads/{user_id}/{uuid.uuid4()}.{ext}"
     media_url = None  # This will be set conditionally
 
-    # If audio is included and the file is an image → stitch into video
-    if audio and ext.lower() not in ["mp4", "mov", "webm"]:
+    # Check if this is a media package that needs stitching (our new format)
+    if requires_stitching and audio:
+        print("🔄 Processing media package with explicit stitching flag")
         audio_ext = secure_filename(audio.filename).split('.')[-1]
         audio_key = f"user_uploads/{user_id}/{uuid.uuid4()}.{audio_ext}"
         s3.upload_fileobj(audio, S3_BUCKET, audio_key, ExtraArgs={"ContentType": audio.content_type})
@@ -120,7 +125,50 @@ def upload():
             local_out = os.path.join(tmpdir, "output.mp4")
 
             file.save(local_img)
-            s3.download_file(S3_BUCKET, audio_key, local_aud)
+            audio.save(local_aud)  # Save audio directly instead of downloading from S3
+
+            print("🧵 Stitching image + audio into video...")
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-i", local_img,
+                "-i", local_aud,
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-shortest",
+                "-pix_fmt", "yuv420p",
+                local_out
+            ]
+            result = run(ffmpeg_cmd)
+            if result.returncode != 0:
+                print("❌ FFmpeg failed")
+                return jsonify({"error": "Failed to stitch audio and image"}), 500
+
+            # Upload stitched video
+            stitched_key = f"user_uploads/{user_id}/{uuid.uuid4()}.mp4"
+            with open(local_out, "rb") as f:
+                s3.upload_fileobj(f, S3_BUCKET, stitched_key, ExtraArgs={"ContentType": "video/mp4"})
+            media_url = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{stitched_key}"
+            print(f"🎞️ Uploaded stitched video: {stitched_key}")
+
+    # Handle legacy format (image + audio without requires_stitching flag)
+    elif audio and ext.lower() not in ["mp4", "mov", "webm"]:
+        print("🔄 Processing legacy format (image + audio)")
+        audio_ext = secure_filename(audio.filename).split('.')[-1]
+        audio_key = f"user_uploads/{user_id}/{uuid.uuid4()}.{audio_ext}"
+        s3.upload_fileobj(audio, S3_BUCKET, audio_key, ExtraArgs={"ContentType": audio.content_type})
+        print(f"🎤 Uploaded audio: {audio_key}")
+
+        # Stitch image + audio
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_img = os.path.join(tmpdir, f"image.{ext}")
+            local_aud = os.path.join(tmpdir, f"audio.{audio_ext}")
+            local_out = os.path.join(tmpdir, "output.mp4")
+
+            file.save(local_img)
+            s3.download_file(S3_BUCKET, audio_key, local_aud)  # Legacy flow downloads from S3
 
             print("🧵 Stitching image + audio into video...")
             ffmpeg_cmd = [
