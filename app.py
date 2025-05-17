@@ -206,7 +206,7 @@ def delete_entry(entry_id):
 
     return jsonify({"success": True})
 
-@app.route("/ping")
+@app.route("/api/ping")
 def ping():
     return "pong"
 
