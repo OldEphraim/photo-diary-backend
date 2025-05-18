@@ -9,6 +9,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import jwt
 from jwt import PyJWKClient
+from botocore.exceptions import ClientError
 
 load_dotenv()
 
@@ -16,7 +17,7 @@ app = Flask(__name__)
 allowed_origins = os.getenv("ALLOWED_ORIGINS")
 CORS(app, origins=allowed_origins.split(",") if allowed_origins else "*")
 
-# S3 config from .env
+# S3 config
 S3_BUCKET = os.getenv("S3_BUCKET")
 S3_REGION = os.getenv("S3_REGION")
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
@@ -33,35 +34,32 @@ s3 = boto3.client(
     aws_secret_access_key=AWS_SECRET_KEY,
 )
 
-# Entry persistence
-ENTRIES_FILE = "entries.json"
-ENTRIES = {}  # in-memory store
-
-def load_entries():
-    global ENTRIES
+# Load per-user entries from S3
+def load_user_entries(user_id):
     try:
-        with open(ENTRIES_FILE, "r") as f:
-            ENTRIES.update(json.load(f))
-            print("📂 Loaded entries from disk.")
-    except FileNotFoundError:
-        print("📁 No saved entries found; starting fresh.")
-        ENTRIES = {}
-    except Exception as e:
-        print("❌ Error loading entries.json:", e)
-        ENTRIES = {}
+        response = s3.get_object(Bucket=S3_BUCKET, Key=f"entries/{user_id}.json")
+        return json.load(response["Body"])
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "NoSuchKey":
+            print(f"📁 No saved entries for {user_id}; starting fresh.")
+        else:
+            print("❌ Failed to load entries:", e)
+        return []
 
-def save_entries():
+# Save per-user entries to S3
+def save_user_entries(user_id, entries):
     try:
-        with open(ENTRIES_FILE, "w") as f:
-            json.dump(ENTRIES, f, indent=2)
-            print("💾 Saved entries to disk.")
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=f"entries/{user_id}.json",
+            Body=json.dumps(entries),
+            ContentType="application/json"
+        )
+        print(f"💾 Saved entries for {user_id} to S3.")
     except Exception as e:
         print("❌ Failed to save entries:", e)
 
-# Load entries at startup
-load_entries()
-
-# Auth
+# Verify Clerk token
 def verify_token(headers):
     token = headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
@@ -86,7 +84,7 @@ def verify_token(headers):
         print("❌ JWT verification failed:", str(e))
         return None
 
-# Routes
+# Upload endpoint
 @app.route("/api/upload", methods=["POST"])
 def upload():
     print("📥 Received POST /api/upload")
@@ -102,43 +100,46 @@ def upload():
 
     ext = secure_filename(file.filename).split('.')[-1]
     file_key = f"user_uploads/{user_id}/{uuid.uuid4()}.{ext}"
-    
-    # Upload the file as-is (photo or video)
+
     s3.upload_fileobj(file, S3_BUCKET, file_key, ExtraArgs={"ContentType": file.content_type})
     print(f"⬆️ Uploaded file: {file_key}")
     media_url = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{file_key}"
 
-    # Save entry
-    entry_id = str(uuid.uuid4())
     entry = {
-        "id": entry_id,
+        "id": str(uuid.uuid4()),
         "media_url": media_url,
         "caption": caption,
         "created_at": datetime.utcnow().isoformat()
     }
 
-    ENTRIES.setdefault(user_id, []).append(entry)
-    save_entries()
+    entries = load_user_entries(user_id)
+    entries.append(entry)
+    save_user_entries(user_id, entries)
+
     return jsonify(entry)
 
+# Get entries
 @app.route("/api/entries", methods=["GET"])
 def get_entries():
     user_id = verify_token(request.headers)
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify(ENTRIES.get(user_id, []))
 
+    entries = load_user_entries(user_id)
+    return jsonify(entries)
+
+# Delete entry
 @app.route("/api/entry/<entry_id>", methods=["DELETE"])
 def delete_entry(entry_id):
     user_id = verify_token(request.headers)
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
 
-    user_entries = ENTRIES.get(user_id, [])
+    entries = load_user_entries(user_id)
     updated_entries = []
     deleted_entry = None
 
-    for entry in user_entries:
+    for entry in entries:
         if entry["id"] == entry_id:
             deleted_entry = entry
         else:
@@ -155,11 +156,10 @@ def delete_entry(entry_id):
     except Exception as e:
         print("❌ Failed to delete from S3:", e)
 
-    ENTRIES[user_id] = updated_entries
-    save_entries()
-
+    save_user_entries(user_id, updated_entries)
     return jsonify({"success": True})
 
+# Health check
 @app.route("/api/ping")
 def ping():
     return "pong"
