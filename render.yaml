@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: photo-diary-backend
+    env: python
+    region: oregon
+    buildCommand: ""
+    startCommand: gunicorn app:app
+    autoDeploy: true
+    envVars:
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: CLERK_BASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

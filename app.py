@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import boto3
@@ -14,7 +13,8 @@ from jwt import PyJWKClient
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+allowed_origins = os.getenv("ALLOWED_ORIGINS")
+CORS(app, origins=allowed_origins.split(",") if allowed_origins else "*")
 
 # S3 config from .env
 S3_BUCKET = os.getenv("S3_BUCKET")
@@ -165,4 +165,4 @@ def ping():
     return "pong"
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
